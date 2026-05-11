@@ -559,15 +559,12 @@ def calculate_effective_opportunity(visitor, tech):
     return max(0, min(1, effective_opportunity))
 
 def score_simulation(simulation_log, tech_per_experience):
-    # Walk through simulation log and attach peril scores
-    # to every tech interaction
-    
     scored_log = []
-    
+
     # Track per-technology aggregate scores for best/worst analysis
-    tech_scores = {tech: [] for techs in tech_per_experience.values() 
+    tech_scores = {tech: [] for techs in tech_per_experience.values()
                    for tech in techs}
-    
+
     for hour_log in simulation_log:
         scored_hour = {
             "hour": hour_log["hour"],
@@ -575,13 +572,12 @@ def score_simulation(simulation_log, tech_per_experience):
             "total_visitors": hour_log["total_visitors"],
             "visitor_logs": []
         }
-        
+
         for visitor_log in hour_log["visitor_logs"]:
             visitor = visitor_log["visitor"]
             scored_visitor = {
                 "visitor": visitor,
                 "experiences": [],
-                # Aggregate peril scores across all this visitor's interactions
                 "visitor_peril_summary": {
                     "disresonance": [],
                     "cognitive_dissonance": [],
@@ -589,44 +585,62 @@ def score_simulation(simulation_log, tech_per_experience):
                     "overall_peril": []
                 }
             }
-            
+
             for exp_log in visitor_log["experiences"]:
-                
+
                 if exp_log["type"] in ["excluded", "traditional"]:
-                    # No peril scoring for excluded or traditional interactions
                     scored_visitor["experiences"].append(exp_log)
                     continue
-                
+
                 exp_id = exp_log["experience_id"]
-                
-                # Get the technologies in this experience
                 techs_in_exp = tech_per_experience.get(exp_id, [])
-                
-                exp_peril_scores = []
-                
+
+                # Filter out excluded technologies first
+                accessible_techs = []
                 for tech_name in techs_in_exp:
                     tech = TECHNOLOGIES[tech_name]
-                    
-                    # Calculate effective opportunity
+                    if visitor["disability"] and visitor["disability"] in tech["excludes"]:
+                        continue
+                    accessible_techs.append((tech_name, tech))
+
+                # If nothing is accessible, mark as excluded and move on
+                if not accessible_techs:
+                    scored_visitor["experiences"].append({
+                        "experience_id": exp_id,
+                        "type": "excluded",
+                        "time_spent": 0
+                    })
+                    continue
+
+                # 85% pick best match, 15% engage with all accessible
+                if len(accessible_techs) == 1 or random.random() > 0.15:
+                    def fit_score(tech_tuple):
+                        _, t = tech_tuple
+                        tech_savviness = 1 - visitor["tech_avoidance"] * 0.6
+                        complexity_fit = abs(t["technical_complexity"] - tech_savviness)
+                        motivation_fit = abs(visitor["motivation"] - t["experience_type"])
+                        return complexity_fit * 0.5 + motivation_fit * 0.5
+
+                    best_tech = sorted(accessible_techs, key=fit_score)[0]
+                    techs_to_score = [best_tech]
+                else:
+                    techs_to_score = accessible_techs
+
+                exp_peril_scores = []
+                for tech_name, tech in techs_to_score:
                     eff_opp = calculate_effective_opportunity(visitor, tech_name)
-                    
-                    # Calculate peril scores
                     peril = calculate_peril_scores(visitor, exp_log, tech_name, tech)
-                    
-                    # Effective opportunity modulates overall peril
-                    # Lower opportunity = higher peril contribution
+
                     peril["overall_peril"] = round(
-                        peril["overall_peril"] * (1 + (1 - eff_opp) * 0.3), 3
+                        min(1, peril["overall_peril"] * (1 + (1 - eff_opp) * 0.3)), 3
                     )
-                    peril["overall_peril"] = min(1, peril["overall_peril"])
-                    
+
                     exp_peril_scores.append(peril)
-                    
-                    # Log per-technology scores
+
                     if tech_name in tech_scores:
                         tech_scores[tech_name].append(peril["overall_peril"])
-                
-                # Average peril across technologies in this experience
+
+                # Average peril across technologies scored
                 if exp_peril_scores:
                     avg_peril = {
                         "disresonance": round(sum(
@@ -642,34 +656,33 @@ def score_simulation(simulation_log, tech_per_experience):
                             p["overall_peril"] for p in exp_peril_scores
                         ) / len(exp_peril_scores), 3)
                     }
-                    
+
                     scored_exp = {**exp_log, "peril_scores": avg_peril}
                     scored_visitor["experiences"].append(scored_exp)
-                    
-                    # Add to visitor summary
-                    for key in ["disresonance", "cognitive_dissonance", 
+
+                    for key in ["disresonance", "cognitive_dissonance",
                                 "loathing", "overall_peril"]:
                         scored_visitor["visitor_peril_summary"][key].append(
                             avg_peril[key]
                         )
-            
+
             # Average visitor peril summary across all their experiences
             for key in scored_visitor["visitor_peril_summary"]:
                 scores = scored_visitor["visitor_peril_summary"][key]
                 scored_visitor["visitor_peril_summary"][key] = round(
                     sum(scores) / len(scores), 3
                 ) if scores else 0
-            
+
             scored_hour["visitor_logs"].append(scored_visitor)
-        
+
         scored_log.append(scored_hour)
-    
+
     # Build exhibit-level summary
     all_overall = []
     all_disresonance = []
     all_cognitive = []
     all_loathing = []
-    
+
     for hour_log in scored_log:
         for vl in hour_log["visitor_logs"]:
             summary = vl["visitor_peril_summary"]
@@ -678,29 +691,27 @@ def score_simulation(simulation_log, tech_per_experience):
                 all_disresonance.append(summary["disresonance"])
                 all_cognitive.append(summary["cognitive_dissonance"])
                 all_loathing.append(summary["loathing"])
-    
-    # Dominant peril type
+
     avg_dis = sum(all_disresonance) / len(all_disresonance) if all_disresonance else 0
     avg_cog = sum(all_cognitive) / len(all_cognitive) if all_cognitive else 0
     avg_loa = sum(all_loathing) / len(all_loathing) if all_loathing else 0
-    
+
     dominant_peril = max(
         [("disresonance", avg_dis),
          ("cognitive_dissonance", avg_cog),
          ("loathing", avg_loa)],
         key=lambda x: x[1]
     )[0]
-    
-    # Best and worst performing technologies
+
     tech_averages = {
         tech: round(sum(scores) / len(scores), 3)
         for tech, scores in tech_scores.items() if scores
     }
-    
+
     best_tech = min(tech_averages, key=tech_averages.get) if tech_averages else None
     worst_tech = max(tech_averages, key=tech_averages.get) if tech_averages else None
-    
-    exhibit_summary = {
+
+    return scored_log, {
         "avg_overall_peril": round(
             sum(all_overall) / len(all_overall), 3
         ) if all_overall else 0,
@@ -712,8 +723,6 @@ def score_simulation(simulation_log, tech_per_experience):
         "best_performing_tech": best_tech,
         "worst_performing_tech": worst_tech
     }
-    
-    return scored_log, exhibit_summary
 
 def run_full_simulation(num_experiences, tech_per_experience, tech_ratio, seed=None):
     # Single entry point for the full simulation pipeline
